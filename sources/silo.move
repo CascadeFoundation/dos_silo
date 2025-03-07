@@ -1,5 +1,6 @@
 module dos_silo::silo;
 
+use std::type_name::{Self, TypeName};
 use std::u64::min;
 use sui::table_vec::{Self, TableVec};
 
@@ -22,15 +23,22 @@ public struct Silo<phantom ITEM: key + store> has key, store {
     items: TableVec<ITEM>,
 }
 
+public struct SiloAdminCap has key, store {
+    id: UID,
+    silo_id: ID,
+}
+
 //=== Errors ===
 
 const ESiloFilling: u64 = 0;
 const ESiloReady: u64 = 1;
-const ECapacityTooLow: u64 = 2;
+const ESiloNotEmpty: u64 = 2;
+const ECapacityTooLow: u64 = 3;
+const EInvalidSiloAdminCap: u64 = 4;
 
 //=== Public Functions ===
 
-public fun new<ITEM: key + store>(capacity: u64, ctx: &mut TxContext): Silo<ITEM> {
+public fun new<ITEM: key + store>(capacity: u64, ctx: &mut TxContext): (Silo<ITEM>, SiloAdminCap) {
     let silo = Silo {
         id: object::new(ctx),
         state: SiloState::FILLING,
@@ -38,10 +46,30 @@ public fun new<ITEM: key + store>(capacity: u64, ctx: &mut TxContext): Silo<ITEM
         items: table_vec::empty(ctx),
     };
 
-    silo
+    let silo_admin_cap = SiloAdminCap {
+        id: object::new(ctx),
+        silo_id: silo.id(),
+    };
+
+    (silo, silo_admin_cap)
 }
 
-public fun add_item<ITEM: key + store>(self: &mut Silo<ITEM>, item: ITEM) {
+// Destroy an empty silo.
+public fun destroy_silo<ITEM: key + store>(self: Silo<ITEM>, cap: SiloAdminCap) {
+    assert!(cap.silo_id == self.id(), EInvalidSiloAdminCap);
+    assert!(self.items.is_empty(), ESiloNotEmpty);
+
+    let Silo { id, items, .. } = self;
+    id.delete();
+    items.destroy_empty();
+
+    let SiloAdminCap { id, .. } = cap;
+    id.delete()
+}
+
+public fun add_item<ITEM: key + store>(self: &mut Silo<ITEM>, cap: &SiloAdminCap, item: ITEM) {
+    assert!(cap.silo_id == self.id(), EInvalidSiloAdminCap);
+
     match (self.state) {
         SiloState::FILLING => {
             // Add the item to the silo.
@@ -56,14 +84,22 @@ public fun add_item<ITEM: key + store>(self: &mut Silo<ITEM>, item: ITEM) {
     }
 }
 
-public fun remove_item<ITEM: key + store>(self: &mut Silo<ITEM>): ITEM {
+public fun remove_item<ITEM: key + store>(self: &mut Silo<ITEM>, cap: &SiloAdminCap): ITEM {
+    assert!(cap.silo_id == self.id(), EInvalidSiloAdminCap);
+
     match (self.state) {
         SiloState::FILLING => abort ESiloFilling,
         SiloState::READY => { self.items.pop_back() },
     }
 }
 
-public fun remove_items<ITEM: key + store>(self: &mut Silo<ITEM>, mut quantity: u64): vector<ITEM> {
+public fun remove_items<ITEM: key + store>(
+    self: &mut Silo<ITEM>,
+    cap: &SiloAdminCap,
+    quantity: u64,
+): vector<ITEM> {
+    assert!(cap.silo_id == self.id(), EInvalidSiloAdminCap);
+
     match (self.state) {
         SiloState::FILLING => abort ESiloFilling,
         SiloState::READY => {
@@ -72,7 +108,13 @@ public fun remove_items<ITEM: key + store>(self: &mut Silo<ITEM>, mut quantity: 
     }
 }
 
-public fun set_capacity<ITEM: key + store>(self: &mut Silo<ITEM>, capacity: u64) {
+public fun set_capacity<ITEM: key + store>(
+    self: &mut Silo<ITEM>,
+    cap: &SiloAdminCap,
+    capacity: u64,
+) {
+    assert!(cap.silo_id == self.id(), EInvalidSiloAdminCap);
+
     // Ensure the capacity is greater than the number of items currentlyin the silo.
     assert!(capacity >= self.items.length(), ECapacityTooLow);
     // Set the capacity.
@@ -85,6 +127,10 @@ public fun set_capacity<ITEM: key + store>(self: &mut Silo<ITEM>, capacity: u64)
 
 //=== View Functions ===
 
+public fun id<ITEM: key + store>(self: &Silo<ITEM>): ID {
+    self.id.to_inner()
+}
+
 public fun size<ITEM: key + store>(self: &Silo<ITEM>): u64 {
     self.items.length()
 }
@@ -93,14 +139,18 @@ public fun capacity<ITEM: key + store>(self: &Silo<ITEM>): u64 {
     self.capacity
 }
 
-public fun is_filling<ITEM: key + store>(self: &Silo<ITEM>): bool {
+public fun item_type<ITEM: key + store>(): TypeName {
+    type_name::get<ITEM>()
+}
+
+public fun is_filling_state<ITEM: key + store>(self: &Silo<ITEM>): bool {
     match (self.state) {
         SiloState::FILLING => true,
         SiloState::READY => false,
     }
 }
 
-public fun is_ready<ITEM: key + store>(self: &Silo<ITEM>): bool {
+public fun is_ready_state<ITEM: key + store>(self: &Silo<ITEM>): bool {
     match (self.state) {
         SiloState::FILLING => false,
         SiloState::READY => true,
