@@ -89,6 +89,10 @@ public fun destroy_silo<ITEM: key + store>(self: Silo<ITEM>, cap: SiloAdminCap) 
     assert!(cap.silo_id == self.id.to_inner(), EInvalidSiloAdminCap);
     assert!(self.items.is_empty(), ESiloNotEmpty);
 
+    emit(SiloDestroyedEvent {
+        silo_id: self.id.to_inner(),
+    });
+
     let Silo { id, items, .. } = self;
     id.delete();
     items.destroy_empty();
