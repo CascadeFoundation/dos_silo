@@ -2,6 +2,7 @@ module dos_silo::silo;
 
 use std::type_name::{Self, TypeName};
 use std::u64::min;
+use sui::event::emit;
 use sui::table_vec::{Self, TableVec};
 
 //=== Structs ===
@@ -28,6 +29,30 @@ public struct SiloAdminCap has key, store {
     silo_id: ID,
 }
 
+public struct SiloCreatedEvent has copy, drop {
+    silo_id: ID,
+    silo_admin_cap_id: ID,
+}
+
+public struct SiloDestroyedEvent has copy, drop {
+    silo_id: ID,
+}
+
+public struct SiloItemAddedEvent has copy, drop {
+    silo_id: ID,
+    item_id: ID,
+}
+
+public struct SiloItemRemovedEvent has copy, drop {
+    silo_id: ID,
+    item_id: ID,
+}
+
+public struct SiloCapacitySetEvent has copy, drop {
+    silo_id: ID,
+    capacity: u64,
+}
+
 //=== Errors ===
 
 const ESiloFilling: u64 = 0;
@@ -48,15 +73,20 @@ public fun new<ITEM: key + store>(capacity: u64, ctx: &mut TxContext): (Silo<ITE
 
     let silo_admin_cap = SiloAdminCap {
         id: object::new(ctx),
-        silo_id: silo.id(),
+        silo_id: silo.id.to_inner(),
     };
+
+    emit(SiloCreatedEvent {
+        silo_id: silo.id.to_inner(),
+        silo_admin_cap_id: object::id(&silo_admin_cap),
+    });
 
     (silo, silo_admin_cap)
 }
 
 // Destroy an empty silo.
 public fun destroy_silo<ITEM: key + store>(self: Silo<ITEM>, cap: SiloAdminCap) {
-    assert!(cap.silo_id == self.id(), EInvalidSiloAdminCap);
+    assert!(cap.silo_id == self.id.to_inner(), EInvalidSiloAdminCap);
     assert!(self.items.is_empty(), ESiloNotEmpty);
 
     let Silo { id, items, .. } = self;
@@ -68,10 +98,14 @@ public fun destroy_silo<ITEM: key + store>(self: Silo<ITEM>, cap: SiloAdminCap) 
 }
 
 public fun add_item<ITEM: key + store>(self: &mut Silo<ITEM>, cap: &SiloAdminCap, item: ITEM) {
-    assert!(cap.silo_id == self.id(), EInvalidSiloAdminCap);
+    assert!(cap.silo_id == self.id.to_inner(), EInvalidSiloAdminCap);
 
     match (self.state) {
         SiloState::FILLING => {
+            emit(SiloItemAddedEvent {
+                silo_id: self.id.to_inner(),
+                item_id: object::id(&item),
+            });
             // Add the item to the silo.
             self.items.push_back(item);
             // If the silo has a capacity, and the number of items in the silo
@@ -85,11 +119,20 @@ public fun add_item<ITEM: key + store>(self: &mut Silo<ITEM>, cap: &SiloAdminCap
 }
 
 public fun remove_item<ITEM: key + store>(self: &mut Silo<ITEM>, cap: &SiloAdminCap): ITEM {
-    assert!(cap.silo_id == self.id(), EInvalidSiloAdminCap);
+    assert!(cap.silo_id == self.id.to_inner(), EInvalidSiloAdminCap);
 
     match (self.state) {
         SiloState::FILLING => abort ESiloFilling,
-        SiloState::READY => { self.items.pop_back() },
+        SiloState::READY => {
+            let item = self.items.pop_back();
+
+            emit(SiloItemRemovedEvent {
+                silo_id: self.id.to_inner(),
+                item_id: object::id(&item),
+            });
+
+            item
+        },
     }
 }
 
@@ -98,7 +141,7 @@ public fun remove_items<ITEM: key + store>(
     cap: &SiloAdminCap,
     quantity: u64,
 ): vector<ITEM> {
-    assert!(cap.silo_id == self.id(), EInvalidSiloAdminCap);
+    assert!(cap.silo_id == self.id.to_inner(), EInvalidSiloAdminCap);
 
     match (self.state) {
         SiloState::FILLING => abort ESiloFilling,
@@ -113,23 +156,26 @@ public fun set_capacity<ITEM: key + store>(
     cap: &SiloAdminCap,
     capacity: u64,
 ) {
-    assert!(cap.silo_id == self.id(), EInvalidSiloAdminCap);
+    assert!(cap.silo_id == self.id.to_inner(), EInvalidSiloAdminCap);
 
     // Ensure the capacity is greater than the number of items currentlyin the silo.
     assert!(capacity >= self.items.length(), ECapacityTooLow);
+
     // Set the capacity.
     self.capacity = capacity;
+
     // If the capacity is now equal to the number of items in the silo, set the state to READY.
     if (self.capacity == self.items.length()) {
         self.state = SiloState::READY;
-    }
+    };
+
+    emit(SiloCapacitySetEvent {
+        silo_id: self.id.to_inner(),
+        capacity,
+    });
 }
 
 //=== View Functions ===
-
-public fun id<ITEM: key + store>(self: &Silo<ITEM>): ID {
-    self.id.to_inner()
-}
 
 public fun size<ITEM: key + store>(self: &Silo<ITEM>): u64 {
     self.items.length()
